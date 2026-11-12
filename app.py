@@ -4,7 +4,6 @@ import joblib
 import urllib.request
 import json
 import unicodedata
-import re
 
 st.set_page_config(
     page_title="Használtautó Piaci Értékbecslő és Ajánlatelemző",
@@ -48,6 +47,8 @@ fuels = szurt_uzemanyagok if szurt_uzemanyagok else bundle["fuels"]
 
 eur_huf, is_live_rate = get_eur_huf_rate()
 
+YEARS_LIST = list(range(2026, 1999, -1))
+
 # Alapvető európai modellek biztosítása minden népszerű márkához
 EXTRA_MODELS = {
     "Volkswagen": ["Golf", "Passat", "Polo", "Tiguan", "Touran", "Caddy", "Transporter", "Jetta", "Bora", "Scirocco", "Arteon", "T-Roc", "Touareg", "Sharan"],
@@ -83,57 +84,6 @@ MAKES_LIST = sorted(BRAND_MODELS.keys())
 for b in MAKES_LIST:
     BRAND_MODELS[b] = sorted(BRAND_MODELS[b]) + ["Egyéb / Listában nem szereplő modell"]
 
-ALL_VEHICLES = []
-for b in MAKES_LIST:
-    for m in BRAND_MODELS[b]:
-        if not m.startswith("Egyéb"):
-            ALL_VEHICLES.append((b, m))
-
-BRAND_ALIASES = {
-    "vw": "Volkswagen",
-    "volkswagen": "Volkswagen",
-    "skoda": "Skoda",
-    "audi": "Audi",
-    "bmw": "BMW",
-    "merci": "Mercedes-Benz",
-    "mercedes": "Mercedes-Benz",
-    "opel": "Opel",
-    "ford": "Ford",
-    "toyota": "Toyota",
-    "suzuki": "Suzuki",
-    "honda": "Honda",
-    "mazda": "Mazda",
-    "hyundai": "Hyundai",
-    "kia": "Kia",
-    "renault": "Renault",
-    "peugeot": "Peugeot",
-    "seat": "Seat",
-    "volvo": "Volvo",
-}
-
-GENERATION_YEARS = {
-    ("golf", "4"): 2002,
-    ("golf", "iv"): 2002,
-    ("golf", "5"): 2008,
-    ("golf", "v"): 2008,
-    ("golf", "6"): 2011,
-    ("golf", "vi"): 2011,
-    ("golf", "7"): 2016,
-    ("golf", "vii"): 2016,
-    ("golf", "8"): 2021,
-    ("golf", "viii"): 2021,
-    ("passat", "b6"): 2008,
-    ("passat", "b7"): 2013,
-    ("passat", "b8"): 2017,
-    ("octavia", "1"): 2003,
-    ("octavia", "2"): 2009,
-    ("octavia", "3"): 2016,
-    ("octavia", "4"): 2021,
-    ("a4", "b7"): 2006,
-    ("a4", "b8"): 2012,
-    ("a4", "b9"): 2018,
-}
-
 # --- KIVITEL, ÁLLAPOT ÉS PIACI KALIBRÁCIÓS SZORZÓK ---
 TRIMS = {
     "Alap kivitel (pl. Trendline, Basis, Access)": 0.95,
@@ -153,86 +103,6 @@ MARKETS = {
     "Német / Nyugat-európai piac (nyers AutoScout24)": 1.00,
 }
 
-# --- SESSION STATE INICIALIZÁLÁS ---
-if "make_val" not in st.session_state:
-    st.session_state["make_val"] = "Volkswagen" if "Volkswagen" in MAKES_LIST else MAKES_LIST[0]
-if "model_val" not in st.session_state:
-    st.session_state["model_val"] = "Golf" if "Golf" in BRAND_MODELS[st.session_state["make_val"]] else BRAND_MODELS[st.session_state["make_val"]][0]
-if "year_val" not in st.session_state:
-    st.session_state["year_val"] = 2016
-if "trim_val" not in st.session_state:
-    st.session_state["trim_val"] = list(TRIMS.keys())[1]
-if "search_msg" not in st.session_state:
-    st.session_state["search_msg"] = ""
-
-def apply_smart_search():
-    raw_q = st.session_state.get("smart_query_input", "").strip()
-    if not raw_q:
-        st.session_state["search_msg"] = ""
-        return
-
-    norm_q = normalize_text(raw_q)
-    tokens = re.findall(r"[a-z]+|\d+", norm_q)
-
-    detected_brand = None
-    for tok in tokens:
-        if tok in BRAND_ALIASES:
-            detected_brand = BRAND_ALIASES[tok]
-            break
-
-    trim_keys = list(TRIMS.keys())
-    if any(t in tokens for t in ["gti", "gtd", "rs", "amg", "cupra", "opc", "type"]):
-        st.session_state["trim_val"] = trim_keys[3]
-    elif any(t in tokens for t in ["gt", "sport", "sline", "rline", "msport", "fr"]):
-        st.session_state["trim_val"] = trim_keys[2]
-    elif any(t in tokens for t in ["trendline", "basis", "alap"]):
-        st.session_state["trim_val"] = trim_keys[0]
-
-    best_score = 0
-    best_pair = None
-
-    for b_name, m_name in ALL_VEHICLES:
-        if detected_brand and b_name != detected_brand:
-            continue
-
-        m_norm = normalize_text(m_name)
-        m_tokens = re.findall(r"[a-z]+|\d+", m_norm)
-        score = 0
-
-        if m_norm in norm_q and len(m_norm) >= 2:
-            score += 10 + len(m_norm)
-
-        for tok in tokens:
-            if tok in BRAND_ALIASES:
-                continue
-            if tok in m_tokens:
-                score += 8
-            elif len(tok) >= 3 and any(mt.startswith(tok) for mt in m_tokens):
-                score += 5
-
-        if score > best_score:
-            best_score = score
-            best_pair = (b_name, m_name)
-
-    if best_pair and best_score >= 5:
-        b_found, m_found = best_pair
-        st.session_state["make_val"] = b_found
-        st.session_state["model_val"] = m_found
-
-        m_key = normalize_text(m_found)
-        for tok in tokens:
-            if (m_key, tok) in GENERATION_YEARS:
-                st.session_state["year_val"] = GENERATION_YEARS[(m_key, tok)]
-                break
-
-        st.session_state["search_msg"] = f"✅ Kiválasztva: **{b_found} {m_found}** (Évjárat: {st.session_state['year_val']})"
-    elif detected_brand:
-        st.session_state["make_val"] = detected_brand
-        st.session_state["model_val"] = "Egyéb / Listában nem szereplő modell"
-        st.session_state["search_msg"] = f"ℹ️ Márka beállítva: **{detected_brand}** (a pontos modell nem szerepel a listában, 'Egyéb' mód aktív)."
-    else:
-        st.session_state["search_msg"] = "⚠️ Nem sikerült pontos modellt azonosítani – válaszd ki a márkát és modellt közvetlenül a két legördülő menüből."
-
 def predict_car_price(
     make,
     car_model,
@@ -249,8 +119,6 @@ def predict_car_price(
     input_row = {col: 0 for col in feature_columns}
     input_row["year"] = year
 
-    # A Random Forest fák 220 000 km felett ritka és zajos adatokon (elírásokon) alapulnak,
-    # ezért az alapbecslést 220 000 km-nél rögzítjük, felette pedig folytonos görbével csökkentjük.
     rf_mileage = min(mileage, 220000)
     input_row["mileage"] = rf_mileage
     input_row["hp"] = hp
@@ -280,7 +148,7 @@ def predict_car_price(
     else:
         age_factor = 1.00
 
-    # 2. Folytonos magas futásteljesítmény-csökkenés (220 000 km felett minden 10 000 km -1.5%)
+    # 2. Folytonos magas futásteljesítmény-csökkenés (220 000 km felett)
     extra_km = max(0, mileage - 220000)
     km_factor = 0.985 ** (extra_km / 10000.0)
 
@@ -313,63 +181,65 @@ st.divider()
 tab1, tab2 = st.tabs(["🎯 Egyedi jármű értékbecslése és ajánlat-ellenőrzés", "📋 Több hirdetés tömeges szűrése"])
 
 # ==============================================================================
-# 1. FÜL: EGYEDI ÉRTÉKBECSLÉS + ANOMÁLIA DETEKTOR + ÉRTÉKVESZTÉSI GÖRBE
+# 1. FÜL: HASZNÁLTAUTÓ.HU-SZERŰ STRUKTURÁLT KERESŐ ÉS ÉRTÉKBECSLŐ
 # ==============================================================================
 with tab1:
-    with st.form("quick_search_form", border=True):
-        q_col1, q_col2 = st.columns([4, 1])
-        with q_col1:
-            st.text_input(
-                "🔍 Gyorskereső (írd be szabadszavas formában, pl. golf 5, vw golf 5 gt, octavia rs, bmw 320, majd nyomj Entert):",
-                key="smart_query_input",
-                placeholder="Pl.: golf 5 gt"
-            )
-        with q_col2:
-            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-            st.form_submit_button("Keresés", on_click=apply_smart_search, use_container_width=True)
+    st.subheader("1. Jármű adatai")
+    r1_c1, r1_c2, r1_c3 = st.columns([1, 1, 1.3])
 
-    if st.session_state["search_msg"]:
-        st.caption(st.session_state["search_msg"])
+    with r1_c1:
+        default_make_idx = MAKES_LIST.index("Volkswagen") if "Volkswagen" in MAKES_LIST else 0
+        selected_make = st.selectbox("Márka:", MAKES_LIST, index=default_make_idx)
 
-    col1, col2 = st.columns(2)
+    with r1_c2:
+        available_models = BRAND_MODELS[selected_make]
+        default_model_idx = available_models.index("Golf") if "Golf" in available_models else 0
+        selected_model = st.selectbox(
+            "Modell:",
+            available_models,
+            index=default_model_idx,
+            key=f"model_select_{selected_make}"
+        )
 
-    with col1:
-        st.subheader("1. Jármű és kivitel kiválasztása")
+    with r1_c3:
+        selected_trim = st.selectbox("Kivitel / Felszereltség:", list(TRIMS.keys()), index=1)
 
-        selected_make = st.selectbox("Márka:", MAKES_LIST, key="make_val")
+    r2_c1, r2_c2, r2_c3 = st.columns([1, 1, 1.3])
 
-        valid_models = BRAND_MODELS[selected_make]
-        if st.session_state["model_val"] not in valid_models:
-            st.session_state["model_val"] = valid_models[0]
+    with r2_c1:
+        year = st.selectbox("Évjárat:", YEARS_LIST, index=YEARS_LIST.index(2016))
 
-        selected_model = st.selectbox("Típus / Modell:", valid_models, key="model_val")
-
-        selected_trim = st.selectbox("Kivitel / Felszereltségi szint:", list(TRIMS.keys()), key="trim_val")
-
-        year = st.slider("Gyártási év (generáció):", min_value=2000, max_value=2026, key="year_val", step=1)
-
-        c_eng1, c_eng2 = st.columns(2)
-        with c_eng1:
-            ccm = st.number_input("Hengerűrtartalom (cm³):", min_value=800, max_value=6500, value=1968, step=50)
-        with c_eng2:
-            hp = st.number_input("Teljesítmény (Lóerő / LE):", min_value=50, max_value=650, value=140, step=5)
-
-    with col2:
-        st.subheader("2. Műszaki adatok, állapot és hirdetési ár")
+    with r2_c2:
         mileage = st.number_input("Futott kilométer (km):", min_value=1000, max_value=500000, value=145000, step=5000)
 
-        c_tr1, c_tr2 = st.columns(2)
-        with c_tr1:
-            default_gear_idx = 1 if len(gears) > 1 and str(gears[0]).startswith("-") else 0
-            gear = st.selectbox("Sebességváltó:", gears, index=default_gear_idx)
-        with c_tr2:
-            fuel = st.selectbox("Üzemanyag típusa:", fuels, index=0)
+    with r2_c3:
+        selected_condition = st.selectbox("Jármű állapota:", list(CONDITIONS.keys()), index=1)
 
-        selected_condition = st.selectbox("Műszaki és esztétikai állapot:", list(CONDITIONS.keys()), index=1)
+    st.subheader("2. Motor és hajtáslánc")
+    r3_c1, r3_c2, r3_c3, r3_c4 = st.columns(4)
+
+    with r3_c1:
+        fuel = st.selectbox("Üzemanyag:", fuels, index=0)
+
+    with r3_c2:
+        default_gear_idx = 1 if len(gears) > 1 and str(gears[0]).startswith("-") else 0
+        gear = st.selectbox("Sebességváltó:", gears, index=default_gear_idx)
+
+    with r3_c3:
+        ccm = st.number_input("Hengerűrtartalom (cm³):", min_value=800, max_value=6500, value=1968, step=50)
+
+    with r3_c4:
+        hp = st.number_input("Teljesítmény (LE):", min_value=50, max_value=650, value=140, step=5)
+
+    st.subheader("3. Piaci referencia és hirdetési ár ellenőrzése")
+    r4_c1, r4_c2 = st.columns(2)
+
+    with r4_c1:
         selected_market = st.selectbox("Referenciapiac:", list(MARKETS.keys()), index=0)
 
+    with r4_c2:
         listed_price = st.number_input(
-            "Vizsgálandó hirdetési ár (Ft) – ajánlat ellenőrzéséhez (0 = csak becslés):",
+            "Vizsgálandó hirdetési ár (Ft) – írd be az ajánlat ellenőrzéséhez (0 = csak becslés):",
             min_value=0,
             max_value=150000000,
             value=0,
@@ -473,7 +343,7 @@ with tab1:
                     f"A hirdetési ár teljes mértékben összhangban van a jármű évjáratával, kivitelével és műszaki adataival."
                 )
 
-        # --- TÖRTÉNETI ÉRTÉKVESZTÉSI GÖRBE (MONOTONITÁS-KÉNYSZERÍTÉSSEL) ---
+        # --- TÖRTÉNETI ÉRTÉKVESZTÉSI GÖRBE ---
         st.divider()
         st.subheader("📉 Történeti alapú értékvesztési görbe (Futásteljesítmény hatása)")
         st.caption("A kalibrált modell becslése ugyanerre a konfigurációra különböző kilométeróra-állások mellett:")
@@ -487,7 +357,6 @@ with tab1:
                 selected_make, selected_model, year, km_val, hp, gear, fuel,
                 ccm=ccm, trim_label=selected_trim, condition_label=selected_condition, market_label=selected_market
             )
-            # Monoton csökkenés biztosítása a döntési fák apró lépcsőzései ellen
             if prev_price is not None and est_p >= prev_price:
                 est_p = prev_price * 0.992
             prev_price = est_p
