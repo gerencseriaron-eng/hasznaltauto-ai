@@ -3,12 +3,34 @@ import pandas as pd
 import joblib
 import urllib.request
 import json
+import unicodedata
 
 st.set_page_config(
     page_title="Használtautó Piaci Értékbecslő és Ajánlatelemző",
     page_icon="🚘",
     layout="wide"
 )
+
+# --- SZÖVEG NORMALIZÁLÁS (KISBETŰ + ÉKEZETMENTESÍTÉS) ---
+def normalize_text(text):
+    text = str(text).lower().strip()
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(c)
+    )
+
+ALIASES = {
+    "vw": "volkswagen",
+    "merci": "mercedes",
+    "mb": "mercedes",
+    "bimmer": "bmw",
+    "chev": "chevrolet",
+}
+
+def expand_query(query):
+    words = normalize_text(query).split()
+    expanded = [ALIASES.get(w, w) for w in words]
+    return expanded
 
 # --- MODELL ÉS ADATOK BETÖLTÉSE ---
 @st.cache_resource
@@ -37,6 +59,12 @@ szurt_uzemanyagok = [f for f in bundle["fuels"] if not any(k in str(f).lower() f
 fuels = szurt_uzemanyagok if szurt_uzemanyagok else bundle["fuels"]
 
 eur_huf, is_live_rate = get_eur_huf_rate()
+
+# Összes (Márka, Modell) pár előkészítése a gyorskeresőhöz
+ALL_VEHICLES = []
+for b_name in sorted(brand_model_map.keys()):
+    for m_name in sorted(brand_model_map[b_name]):
+        ALL_VEHICLES.append((b_name, m_name))
 
 # --- KIVITEL, ÁLLAPOT ÉS PIACI KALIBRÁCIÓS SZORZÓK ---
 TRIMS = {
@@ -94,7 +122,7 @@ def predict_car_price(
     extra_km = max(0, mileage - 220000)
     km_factor = max(0.75, 1.0 - (extra_km / 100000.0) * 0.08)
 
-    # 3. Hengerűrtartalom finomhangolás (nagyobb lökettérfogatú motorok értéktartása)
+    # 3. Hengerűrtartalom finomhangolás
     ccm_factor = 1.0 + max(-0.03, min(0.06, (ccm - 1600) / 10000.0))
 
     # 4. Kivitel, állapot és célpiac szorzók
@@ -102,8 +130,7 @@ def predict_car_price(
     condition_factor = CONDITIONS.get(condition_label, 1.0)
     market_factor = MARKETS.get(market_label, 0.92)
 
-    calibrated_price = base_price * age_factor * km_factor * ccm_factor * trim_factor * condition_factor * market_factor
-    return calibrated_price
+    return base_price * age_factor * km_factor * ccm_factor * trim_factor * condition_factor * market_factor
 
 # --- FEJLÉC ÉS RENDSZERINFORMÁCIÓK ---
 st.title("🚘 Használtautó Piaci Értékbecslő és Ajánlatelemző")
@@ -131,13 +158,61 @@ with tab1:
 
     with col1:
         st.subheader("1. Jármű és kivitel kiválasztása")
-        makes = sorted(list(brand_model_map.keys()))
-        default_make_idx = makes.index("Volkswagen") if "Volkswagen" in makes else 0
-        selected_make = st.selectbox("Márka:", makes, index=default_make_idx)
 
-        available_models = brand_model_map[selected_make]
-        default_model_idx = available_models.index("Golf") if "Golf" in available_models else 0
-        selected_model = st.selectbox("Típus / Modell:", available_models, index=default_model_idx)
+        search_query = st.text_input(
+            "🔍 Gyorskereső (írd be kis- vagy nagybetűvel, pl. golf, vw golf, octavia, bmw 320):",
+            placeholder="Kezdj el gépelni (pl. golf)..."
+        )
+
+        makes = sorted(list(brand_model_map.keys()))
+
+        if search_query.strip():
+            tokens = expand_query(search_query)
+            raw_norm = normalize_text(search_query)
+
+            matched = []
+            for b_name, m_name in ALL_VEHICLES:
+                combo_norm = normalize_text(f"{b_name} {m_name}")
+                if all(tok in combo_norm for tok in tokens):
+                    m_norm = normalize_text(m_name)
+                    # Prioritási sorrend: 0 = pontos egyezés, 1 = ezzel kezdődik, 2 = tartalmazza
+                    if m_norm == raw_norm or combo_norm == " ".join(tokens):
+                        rank = 0
+                    elif m_norm.startswith(raw_norm):
+                        rank = 1
+                    else:
+                        rank = 2
+                    matched.append((rank, b_name, m_name))
+
+            matched.sort(key=lambda x: (x[0], x[1], x[2]))
+
+            if matched:
+                options_labels = [f"{b} – {m}" for _, b, m in matched]
+                chosen_label = st.selectbox(
+                    f"Találatok ({len(options_labels)} db):",
+                    options_labels,
+                    index=0
+                )
+                selected_make, selected_model = chosen_label.split(" – ", 1)
+            else:
+                st.info("Nincs pontos egyezés a modelllistában – válaszd ki a márkát alább, a modell automatikusan 'Egyéb'-re áll.")
+                selected_make = st.selectbox("Márka:", makes, index=makes.index("Volkswagen") if "Volkswagen" in makes else 0)
+                selected_model = "Egyéb"
+        else:
+            default_make_idx = makes.index("Volkswagen") if "Volkswagen" in makes else 0
+            selected_make = st.selectbox("Márka:", makes, index=default_make_idx)
+
+            raw_models = sorted(list(brand_model_map[selected_make]))
+            available_models = raw_models + ["Egyéb / Listában nem szereplő modell"]
+
+            # Kisbetű-független keresés az alapértelmezett 'Golf' modellre
+            default_model_idx = 0
+            for idx, m_item in enumerate(available_models):
+                if normalize_text(m_item) == "golf":
+                    default_model_idx = idx
+                    break
+
+            selected_model = st.selectbox("Típus / Modell:", available_models, index=default_model_idx)
 
         selected_trim = st.selectbox("Kivitel / Felszereltségi szint:", list(TRIMS.keys()), index=1)
 
