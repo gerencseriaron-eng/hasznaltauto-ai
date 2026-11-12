@@ -48,7 +48,7 @@ fuels = szurt_uzemanyagok if szurt_uzemanyagok else bundle["fuels"]
 
 eur_huf, is_live_rate = get_eur_huf_rate()
 
-# Alapvető európai modellek biztosítása minden népszerű márkához, hogy soha ne legyen "No results"
+# Alapvető európai modellek biztosítása minden népszerű márkához
 EXTRA_MODELS = {
     "Volkswagen": ["Golf", "Passat", "Polo", "Tiguan", "Touran", "Caddy", "Transporter", "Jetta", "Bora", "Scirocco", "Arteon", "T-Roc", "Touareg", "Sharan"],
     "Skoda": ["Octavia", "Superb", "Fabia", "Rapid", "Scala", "Kodiaq", "Karoq", "Kamiq", "Yeti"],
@@ -83,7 +83,6 @@ MAKES_LIST = sorted(BRAND_MODELS.keys())
 for b in MAKES_LIST:
     BRAND_MODELS[b] = sorted(BRAND_MODELS[b]) + ["Egyéb / Listában nem szereplő modell"]
 
-# Gyorskereső index építése
 ALL_VEHICLES = []
 for b in MAKES_LIST:
     for m in BRAND_MODELS[b]:
@@ -112,7 +111,6 @@ BRAND_ALIASES = {
     "volvo": "Volvo",
 }
 
-# Generáció -> tipikus évjárat segédtábla népszerű modellekhez
 GENERATION_YEARS = {
     ("golf", "4"): 2002,
     ("golf", "iv"): 2002,
@@ -174,7 +172,6 @@ def apply_smart_search():
         return
 
     norm_q = normalize_text(raw_q)
-    # Tokenizálás (betűk és számok különválasztása, pl. "golf5" -> ["golf", "5"], "320d" -> ["320", "d"])
     tokens = re.findall(r"[a-z]+|\d+", norm_q)
 
     detected_brand = None
@@ -183,7 +180,6 @@ def apply_smart_search():
             detected_brand = BRAND_ALIASES[tok]
             break
 
-    # Kivitel automatikus felismerése a szövegből
     trim_keys = list(TRIMS.keys())
     if any(t in tokens for t in ["gti", "gtd", "rs", "amg", "cupra", "opc", "type"]):
         st.session_state["trim_val"] = trim_keys[3]
@@ -192,7 +188,6 @@ def apply_smart_search():
     elif any(t in tokens for t in ["trendline", "basis", "alap"]):
         st.session_state["trim_val"] = trim_keys[0]
 
-    # Legjobb modell találat pontozással (nem bukik el extra szavakon, mint az "5" vagy "gt")
     best_score = 0
     best_pair = None
 
@@ -224,7 +219,6 @@ def apply_smart_search():
         st.session_state["make_val"] = b_found
         st.session_state["model_val"] = m_found
 
-        # Generáció évjárat felismerése (pl. "golf 5" -> 2008)
         m_key = normalize_text(m_found)
         for tok in tokens:
             if (m_key, tok) in GENERATION_YEARS:
@@ -254,22 +248,23 @@ def predict_car_price(
 ):
     input_row = {col: 0 for col in feature_columns}
     input_row["year"] = year
-    input_row["mileage"] = mileage
+
+    # A Random Forest fák 220 000 km felett ritka és zajos adatokon (elírásokon) alapulnak,
+    # ezért az alapbecslést 220 000 km-nél rögzítjük, felette pedig folytonos görbével csökkentjük.
+    rf_mileage = min(mileage, 220000)
+    input_row["mileage"] = rf_mileage
     input_row["hp"] = hp
 
-    # Márka beállítása
     make_col = f"make_{make}"
     if make_col in input_row:
         input_row[make_col] = 1
 
-    # Modell beállítása (kisbetű-független egyeztetéssel a tanított oszlopokra)
     target_m = normalize_text(car_model)
     for col in feature_columns:
         if col.startswith("model_") and normalize_text(col[6:]) == target_m:
             input_row[col] = 1
             break
 
-    # Váltó és üzemanyag beállítása
     for col_name in [f"gear_{gear}", f"fuel_{fuel}"]:
         if col_name in input_row:
             input_row[col_name] = 1
@@ -285,9 +280,9 @@ def predict_car_price(
     else:
         age_factor = 1.00
 
-    # 2. Magas futásteljesítmény korrekció (220 000 km felett)
+    # 2. Folytonos magas futásteljesítmény-csökkenés (220 000 km felett minden 10 000 km -1.5%)
     extra_km = max(0, mileage - 220000)
-    km_factor = max(0.75, 1.0 - (extra_km / 100000.0) * 0.08)
+    km_factor = 0.985 ** (extra_km / 10000.0)
 
     # 3. Hengerűrtartalom finomhangolás
     ccm_factor = 1.0 + max(-0.03, min(0.06, (ccm - 1600) / 10000.0))
@@ -321,7 +316,6 @@ tab1, tab2 = st.tabs(["🎯 Egyedi jármű értékbecslése és ajánlat-ellenő
 # 1. FÜL: EGYEDI ÉRTÉKBECSLÉS + ANOMÁLIA DETEKTOR + ÉRTÉKVESZTÉSI GÖRBE
 # ==============================================================================
 with tab1:
-    # Szabadszavas gyorskereső sáv Enter / gomb támogatással
     with st.form("quick_search_form", border=True):
         q_col1, q_col2 = st.columns([4, 1])
         with q_col1:
@@ -344,7 +338,6 @@ with tab1:
 
         selected_make = st.selectbox("Márka:", MAKES_LIST, key="make_val")
 
-        # Ha kézzel márkát váltottál és az előző modell nincs az új márkánál, álljon az elsőre
         valid_models = BRAND_MODELS[selected_make]
         if st.session_state["model_val"] not in valid_models:
             st.session_state["model_val"] = valid_models[0]
@@ -480,18 +473,24 @@ with tab1:
                     f"A hirdetési ár teljes mértékben összhangban van a jármű évjáratával, kivitelével és műszaki adataival."
                 )
 
-        # --- TÖRTÉNETI ÉRTÉKVESZTÉSI GÖRBE ---
+        # --- TÖRTÉNETI ÉRTÉKVESZTÉSI GÖRBE (MONOTONITÁS-KÉNYSZERÍTÉSSEL) ---
         st.divider()
         st.subheader("📉 Történeti alapú értékvesztési görbe (Futásteljesítmény hatása)")
         st.caption("A kalibrált modell becslése ugyanerre a konfigurációra különböző kilométeróra-állások mellett:")
 
         km_points = list(range(40000, 360000, 20000))
         curve_data = []
+        prev_price = None
+
         for km_val in km_points:
             est_p = predict_car_price(
                 selected_make, selected_model, year, km_val, hp, gear, fuel,
                 ccm=ccm, trim_label=selected_trim, condition_label=selected_condition, market_label=selected_market
             )
+            # Monoton csökkenés biztosítása a döntési fák apró lépcsőzései ellen
+            if prev_price is not None and est_p >= prev_price:
+                est_p = prev_price * 0.992
+            prev_price = est_p
             curve_data.append({"Futásteljesítmény (km)": km_val, "Becsült piaci ár (Ft)": round(est_p)})
 
         curve_df = pd.DataFrame(curve_data).set_index("Futásteljesítmény (km)")
